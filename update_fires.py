@@ -1,6 +1,7 @@
 import os
 import re
 from io import StringIO
+from datetime import datetime, timedelta
 
 import geopandas as gpd
 import pandas as pd
@@ -21,7 +22,7 @@ SOURCES = {
     "VIIRS_NOAA21": "noaa-21-viirs-c2/South_Asia",
 }
 
-FILES_PER_SOURCE = 5
+DAYS_TO_KEEP = 5
 
 
 def get_headers():
@@ -36,7 +37,16 @@ def get_headers():
     }
 
 
-def get_files(folder_url):
+def get_recent_dates():
+    today = datetime.utcnow().date()
+
+    return {
+        (today - timedelta(days=i)).strftime("%Y%j")
+        for i in range(DAYS_TO_KEEP)
+    }
+
+
+def get_files(folder_url, recent_dates):
     response = requests.get(
         folder_url,
         headers=get_headers(),
@@ -56,39 +66,47 @@ def get_files(folder_url):
         flags=re.IGNORECASE
     )
 
-    if not links:
-        raise RuntimeError(
-            f"هیچ فایل TXT در مسیر پیدا نشد:\n{folder_url}"
-        )
-
     filenames = []
 
     for link in links:
 
-        # اگر لینک کامل باشد، فقط نام فایل را استخراج می‌کنیم
         filename = link.split("/")[-1]
 
-        if filename.lower().endswith(".txt"):
+        if not filename.lower().endswith(".txt"):
+            continue
+
+        match = re.search(
+            r'_(\d{7})\.txt$',
+            filename
+        )
+
+        if not match:
+            continue
+
+        file_date = match.group(1)
+
+        if file_date in recent_dates:
             filenames.append(filename)
 
-    filenames = sorted(set(filenames))
+    filenames = sorted(
+        set(filenames)
+    )
 
     if not filenames:
         raise RuntimeError(
-            f"هیچ فایل TXT معتبر پیدا نشد:\n{folder_url}"
+            "هیچ فایل مربوط به ۵ روز اخیر پیدا نشد."
         )
 
-    selected = filenames[-FILES_PER_SOURCE:]
-
     print(
-        f"Found {len(filenames)} files. "
-        f"Using last {len(selected)} files."
+        f"Recent files found: {len(filenames)}"
     )
 
-    for filename in selected:
-        print(f"  {filename}")
+    for filename in filenames:
+        print(
+            f"  {filename}"
+        )
 
-    return selected
+    return filenames
 
 
 def download_file(folder_url, filename):
@@ -102,7 +120,7 @@ def download_file(folder_url, filename):
 
     print(
         f"File status: {response.status_code} | "
-        f"{file_url}"
+        f"{filename}"
     )
 
     response.raise_for_status()
@@ -132,7 +150,9 @@ def load_fars():
             "فایل fars.geojson خالی است."
         )
 
-    return fars.to_crs("EPSG:4326")
+    return fars.to_crs(
+        "EPSG:4326"
+    )
 
 
 def filter_fars(df, fars):
@@ -204,32 +224,44 @@ def main():
     print("========================================")
 
     fars = load_fars()
+    recent_dates = get_recent_dates()
+
+    print(
+        "Dates included:"
+    )
+
+    for date_value in sorted(recent_dates):
+        print(
+            f"  {date_value}"
+        )
 
     all_fires = []
-
-    successful_sources = 0
 
     for sensor, folder in SOURCES.items():
 
         print()
         print("========================================")
-        print(f"SOURCE: {sensor}")
+        print(
+            f"SOURCE: {sensor}"
+        )
         print("========================================")
 
-        folder_url = f"{BASE_URL}/{folder}/"
+        folder_url = (
+            f"{BASE_URL}/{folder}/"
+        )
 
         try:
-            filenames = get_files(
-                folder_url
-            )
 
-            source_records = 0
+            filenames = get_files(
+                folder_url,
+                recent_dates
+            )
 
             for filename in filenames:
 
                 print()
                 print(
-                    f"Downloading {filename}"
+                    f"Downloading: {filename}"
                 )
 
                 df = download_file(
@@ -265,17 +297,6 @@ def main():
                     df
                 )
 
-                source_records += len(df)
-
-            if source_records > 0:
-                successful_sources += 1
-
-            print()
-            print(
-                f"{sensor} total Fars records: "
-                f"{source_records}"
-            )
-
         except Exception as error:
 
             print()
@@ -286,17 +307,9 @@ def main():
                 str(error)
             )
 
-    print()
-    print("========================================")
-    print(
-        f"Successful sources: "
-        f"{successful_sources} / {len(SOURCES)}"
-    )
-    print("========================================")
-
     if not all_fires:
         raise RuntimeError(
-            "هیچ داده حریقی برای فارس دریافت نشد."
+            "هیچ داده حریقی برای فارس در ۵ روز اخیر پیدا نشد."
         )
 
     result = pd.concat(
@@ -315,6 +328,24 @@ def main():
         keep="first"
     )
 
+    result["acq_date"] = pd.to_datetime(
+        result["acq_date"],
+        errors="coerce"
+    )
+
+    minimum_date = (
+        datetime.utcnow().date()
+        - timedelta(days=DAYS_TO_KEEP - 1)
+    )
+
+    result = result[
+        result["acq_date"].dt.date >= minimum_date
+    ].copy()
+
+    result["acq_date"] = result[
+        "acq_date"
+    ].dt.strftime("%Y-%m-%d")
+
     os.makedirs(
         "data",
         exist_ok=True
@@ -328,8 +359,7 @@ def main():
     print()
     print("========================================")
     print(
-        f"FINAL FARS FIRE RECORDS: "
-        f"{len(result)}"
+        f"FINAL FARS FIRE RECORDS: {len(result)}"
     )
     print(
         f"OUTPUT: {OUTPUT_FILE}"
