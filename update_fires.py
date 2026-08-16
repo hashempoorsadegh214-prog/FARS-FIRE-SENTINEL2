@@ -1,7 +1,6 @@
 import os
 import re
 from io import StringIO
-from datetime import datetime, timedelta
 
 import geopandas as gpd
 import pandas as pd
@@ -22,8 +21,6 @@ SOURCES = {
     "VIIRS_NOAA21": "noaa-21-viirs-c2/South_Asia",
 }
 
-DAYS_TO_KEEP = 5
-
 
 def get_headers():
     if not TOKEN:
@@ -33,29 +30,15 @@ def get_headers():
 
     return {
         "Authorization": f"Bearer {TOKEN}",
-        "User-Agent": "FARS-FIRE-SENTINEL2"
+        "User-Agent": "FARS-FIRE-SENTINEL2/1.0"
     }
 
 
-def get_recent_dates():
-    today = datetime.utcnow().date()
-
-    return {
-        (today - timedelta(days=i)).strftime("%Y%j")
-        for i in range(DAYS_TO_KEEP)
-    }
-
-
-def get_files(folder_url, recent_dates):
+def get_files(folder_url):
     response = requests.get(
         folder_url,
         headers=get_headers(),
         timeout=60
-    )
-
-    print(
-        f"Directory status: {response.status_code} | "
-        f"{folder_url}"
     )
 
     response.raise_for_status()
@@ -66,61 +49,31 @@ def get_files(folder_url, recent_dates):
         flags=re.IGNORECASE
     )
 
-    filenames = []
+    files = []
 
     for link in links:
-
         filename = link.split("/")[-1]
 
-        if not filename.lower().endswith(".txt"):
-            continue
+        if filename.lower().endswith(".txt"):
+            files.append(filename)
 
-        match = re.search(
-            r'_(\d{7})\.txt$',
-            filename
-        )
+    files = sorted(set(files))
 
-        if not match:
-            continue
-
-        file_date = match.group(1)
-
-        if file_date in recent_dates:
-            filenames.append(filename)
-
-    filenames = sorted(
-        set(filenames)
-    )
-
-    if not filenames:
+    if not files:
         raise RuntimeError(
-            "هیچ فایل مربوط به ۵ روز اخیر پیدا نشد."
+            f"هیچ فایل FIRMS در مسیر پیدا نشد:\n{folder_url}"
         )
 
-    print(
-        f"Recent files found: {len(filenames)}"
-    )
-
-    for filename in filenames:
-        print(
-            f"  {filename}"
-        )
-
-    return filenames
+    return files
 
 
 def download_file(folder_url, filename):
-    file_url = f"{folder_url}{filename}"
+    url = f"{folder_url}{filename}"
 
     response = requests.get(
-        file_url,
+        url,
         headers=get_headers(),
         timeout=120
-    )
-
-    print(
-        f"File status: {response.status_code} | "
-        f"{filename}"
     )
 
     response.raise_for_status()
@@ -138,7 +91,7 @@ def download_file(folder_url, filename):
 def load_fars():
     if not os.path.exists(BOUNDARY_FILE):
         raise RuntimeError(
-            f"فایل {BOUNDARY_FILE} پیدا نشد."
+            f"{BOUNDARY_FILE} پیدا نشد."
         )
 
     fars = gpd.read_file(
@@ -147,28 +100,24 @@ def load_fars():
 
     if fars.empty:
         raise RuntimeError(
-            "فایل fars.geojson خالی است."
+            "fars.geojson خالی است."
         )
 
-    return fars.to_crs(
-        "EPSG:4326"
-    )
+    return fars.to_crs("EPSG:4326")
 
 
 def filter_fars(df, fars):
     if df.empty:
         return df
 
-    required = {
+    if not {
         "latitude",
-        "longitude"
-    }
-
-    missing = required - set(df.columns)
-
-    if missing:
+        "longitude",
+        "acq_date",
+        "acq_time"
+    }.issubset(df.columns):
         raise RuntimeError(
-            f"ستون‌های لازم FIRMS وجود ندارند: {missing}"
+            "ستون‌های لازم FIRMS در فایل وجود ندارند."
         )
 
     df = df.copy()
@@ -183,10 +132,20 @@ def filter_fars(df, fars):
         errors="coerce"
     )
 
+    df["acq_datetime"] = pd.to_datetime(
+        df["acq_date"].astype(str)
+        + " "
+        + df["acq_time"].astype(str).str.zfill(4),
+        format="%Y-%m-%d %H%M",
+        errors="coerce",
+        utc=True
+    )
+
     df = df.dropna(
         subset=[
             "latitude",
-            "longitude"
+            "longitude",
+            "acq_datetime"
         ]
     )
 
@@ -219,50 +178,32 @@ def filter_fars(df, fars):
 
 
 def main():
-    print("========================================")
+    print("================================")
     print("FARS FIRE DATA UPDATE")
-    print("========================================")
+    print("================================")
 
     fars = load_fars()
-    recent_dates = get_recent_dates()
-
-    print(
-        "Dates included:"
-    )
-
-    for date_value in sorted(recent_dates):
-        print(
-            f"  {date_value}"
-        )
 
     all_fires = []
 
     for sensor, folder in SOURCES.items():
 
         print()
-        print("========================================")
-        print(
-            f"SOURCE: {sensor}"
-        )
-        print("========================================")
+        print(f"===== {sensor} =====")
 
-        folder_url = (
-            f"{BASE_URL}/{folder}/"
+        folder_url = f"{BASE_URL}/{folder}/"
+
+        files = get_files(
+            folder_url
         )
 
-        try:
+        for filename in files:
 
-            filenames = get_files(
-                folder_url,
-                recent_dates
+            print(
+                f"Downloading {filename}"
             )
 
-            for filename in filenames:
-
-                print()
-                print(
-                    f"Downloading: {filename}"
-                )
+            try:
 
                 df = download_file(
                     folder_url,
@@ -270,22 +211,11 @@ def main():
                 )
 
                 if df.empty:
-                    print(
-                        "File is empty."
-                    )
                     continue
-
-                print(
-                    f"Records in file: {len(df)}"
-                )
 
                 df = filter_fars(
                     df,
                     fars
-                )
-
-                print(
-                    f"Records inside Fars: {len(df)}"
                 )
 
                 if df.empty:
@@ -297,19 +227,15 @@ def main():
                     df
                 )
 
-        except Exception as error:
+            except Exception as error:
 
-            print()
-            print(
-                f"ERROR in {sensor}:"
-            )
-            print(
-                str(error)
-            )
+                print(
+                    f"ERROR: {error}"
+                )
 
     if not all_fires:
         raise RuntimeError(
-            "هیچ داده حریقی برای فارس در ۵ روز اخیر پیدا نشد."
+            "هیچ داده حریقی برای فارس پیدا نشد."
         )
 
     result = pd.concat(
@@ -317,6 +243,20 @@ def main():
         ignore_index=True
     )
 
+    # آخرین 7 روز بر اساس زمان واقعی رخداد
+    now = pd.Timestamp.now(
+        tz="UTC"
+    )
+
+    seven_days_ago = (
+        now - pd.Timedelta(days=7)
+    )
+
+    result = result[
+        result["acq_datetime"] >= seven_days_ago
+    ].copy()
+
+    # حذف تکراری‌ها
     result = result.drop_duplicates(
         subset=[
             "latitude",
@@ -324,27 +264,23 @@ def main():
             "acq_date",
             "acq_time",
             "sensor"
+        ]
+    )
+
+    # حذف ستون کمکی
+    result = result.drop(
+        columns=["acq_datetime"],
+        errors="ignore"
+    )
+
+    # مرتب‌سازی
+    result = result.sort_values(
+        by=[
+            "acq_date",
+            "acq_time"
         ],
-        keep="first"
+        ascending=False
     )
-
-    result["acq_date"] = pd.to_datetime(
-        result["acq_date"],
-        errors="coerce"
-    )
-
-    minimum_date = (
-        datetime.utcnow().date()
-        - timedelta(days=DAYS_TO_KEEP - 1)
-    )
-
-    result = result[
-        result["acq_date"].dt.date >= minimum_date
-    ].copy()
-
-    result["acq_date"] = result[
-        "acq_date"
-    ].dt.strftime("%Y-%m-%d")
 
     os.makedirs(
         "data",
@@ -357,14 +293,14 @@ def main():
     )
 
     print()
-    print("========================================")
+    print("================================")
     print(
-        f"FINAL FARS FIRE RECORDS: {len(result)}"
+        f"FARS FIRE RECORDS: {len(result)}"
     )
     print(
         f"OUTPUT: {OUTPUT_FILE}"
     )
-    print("========================================")
+    print("================================")
 
 
 if __name__ == "__main__":
