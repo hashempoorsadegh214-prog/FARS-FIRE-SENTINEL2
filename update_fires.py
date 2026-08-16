@@ -40,38 +40,48 @@ def get_files(folder_url):
     response = requests.get(
         folder_url,
         headers=get_headers(),
-        timeout=60,
-        allow_redirects=True
+        timeout=60
     )
 
     print(
         f"Directory status: {response.status_code} | "
-        f"URL: {folder_url}"
+        f"{folder_url}"
     )
 
-    if response.status_code != 200:
-        raise RuntimeError(
-            f"خطا در دسترسی به پوشه FIRMS: "
-            f"{response.status_code}"
-        )
+    response.raise_for_status()
 
-    files = re.findall(
+    links = re.findall(
         r'href=["\']([^"\']+\.txt)["\']',
         response.text,
         flags=re.IGNORECASE
     )
 
-    files = sorted(set(files))
-
-    if not files:
+    if not links:
         raise RuntimeError(
-            f"هیچ فایل TXT در این مسیر پیدا نشد:\n{folder_url}"
+            f"هیچ فایل TXT در مسیر پیدا نشد:\n{folder_url}"
         )
 
-    selected = files[-FILES_PER_SOURCE:]
+    filenames = []
+
+    for link in links:
+
+        # اگر لینک کامل باشد، فقط نام فایل را استخراج می‌کنیم
+        filename = link.split("/")[-1]
+
+        if filename.lower().endswith(".txt"):
+            filenames.append(filename)
+
+    filenames = sorted(set(filenames))
+
+    if not filenames:
+        raise RuntimeError(
+            f"هیچ فایل TXT معتبر پیدا نشد:\n{folder_url}"
+        )
+
+    selected = filenames[-FILES_PER_SOURCE:]
 
     print(
-        f"Found {len(files)} files. "
+        f"Found {len(filenames)} files. "
         f"Using last {len(selected)} files."
     )
 
@@ -81,12 +91,13 @@ def get_files(folder_url):
     return selected
 
 
-def download_file(file_url):
+def download_file(folder_url, filename):
+    file_url = f"{folder_url}{filename}"
+
     response = requests.get(
         file_url,
         headers=get_headers(),
-        timeout=120,
-        allow_redirects=True
+        timeout=120
     )
 
     print(
@@ -94,11 +105,7 @@ def download_file(file_url):
         f"{file_url}"
     )
 
-    if response.status_code != 200:
-        raise RuntimeError(
-            f"دانلود فایل موفق نبود: "
-            f"{response.status_code}"
-        )
+    response.raise_for_status()
 
     text = response.text.strip()
 
@@ -125,9 +132,7 @@ def load_fars():
             "فایل fars.geojson خالی است."
         )
 
-    return fars.to_crs(
-        "EPSG:4326"
-    )
+    return fars.to_crs("EPSG:4326")
 
 
 def filter_fars(df, fars):
@@ -143,8 +148,10 @@ def filter_fars(df, fars):
 
     if missing:
         raise RuntimeError(
-            f"ستون‌های لازم در داده FIRMS وجود ندارند: {missing}"
+            f"ستون‌های لازم FIRMS وجود ندارند: {missing}"
         )
+
+    df = df.copy()
 
     df["latitude"] = pd.to_numeric(
         df["latitude"],
@@ -167,7 +174,7 @@ def filter_fars(df, fars):
         return df
 
     points = gpd.GeoDataFrame(
-        df.copy(),
+        df,
         geometry=gpd.points_from_xy(
             df["longitude"],
             df["latitude"]
@@ -199,6 +206,7 @@ def main():
     fars = load_fars()
 
     all_fires = []
+
     successful_sources = 0
 
     for sensor, folder in SOURCES.items():
@@ -208,23 +216,16 @@ def main():
         print(f"SOURCE: {sensor}")
         print("========================================")
 
-        folder_url = (
-            f"{BASE_URL}/{folder}/"
-        )
+        folder_url = f"{BASE_URL}/{folder}/"
 
         try:
-
-            files = get_files(
+            filenames = get_files(
                 folder_url
             )
 
-            source_has_data = False
+            source_records = 0
 
-            for filename in files:
-
-                file_url = (
-                    f"{folder_url}{filename}"
-                )
+            for filename in filenames:
 
                 print()
                 print(
@@ -232,12 +233,13 @@ def main():
                 )
 
                 df = download_file(
-                    file_url
+                    folder_url,
+                    filename
                 )
 
                 if df.empty:
                     print(
-                        "File contains no records."
+                        "File is empty."
                     )
                     continue
 
@@ -263,10 +265,16 @@ def main():
                     df
                 )
 
-                source_has_data = True
+                source_records += len(df)
 
-            if source_has_data:
+            if source_records > 0:
                 successful_sources += 1
+
+            print()
+            print(
+                f"{sensor} total Fars records: "
+                f"{source_records}"
+            )
 
         except Exception as error:
 
@@ -286,45 +294,31 @@ def main():
     )
     print("========================================")
 
-    if successful_sources == 0:
+    if not all_fires:
         raise RuntimeError(
-            "هیچ منبع FIRMS با موفقیت پردازش نشد."
+            "هیچ داده حریقی برای فارس دریافت نشد."
         )
+
+    result = pd.concat(
+        all_fires,
+        ignore_index=True
+    )
+
+    result = result.drop_duplicates(
+        subset=[
+            "latitude",
+            "longitude",
+            "acq_date",
+            "acq_time",
+            "sensor"
+        ],
+        keep="first"
+    )
 
     os.makedirs(
         "data",
         exist_ok=True
     )
-
-    if all_fires:
-
-        result = pd.concat(
-            all_fires,
-            ignore_index=True
-        )
-
-        result = result.drop_duplicates(
-            subset=[
-                "latitude",
-                "longitude",
-                "acq_date",
-                "acq_time",
-                "sensor"
-            ],
-            keep="first"
-        )
-
-    else:
-
-        result = pd.DataFrame(
-            columns=[
-                "latitude",
-                "longitude",
-                "acq_date",
-                "acq_time",
-                "sensor"
-            ]
-        )
 
     result.to_csv(
         OUTPUT_FILE,
