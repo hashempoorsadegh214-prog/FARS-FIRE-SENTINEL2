@@ -1,0 +1,4 @@
+name: Update Fars Fire Data
+
+on:
+  workflow_dispatch:
