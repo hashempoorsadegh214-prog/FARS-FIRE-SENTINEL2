@@ -1,56 +1,190 @@
-name: Update Fars Fire Data
+import os
+import re
+from io import StringIO
 
-on:
-  workflow_dispatch:
+import pandas as pd
+import requests
+import geopandas as gpd
 
-  schedule:
-    - cron: "*/30 * * * *"
 
-permissions:
-  contents: write
+TOKEN = os.getenv("EARTHDATA_TOKEN")
 
-jobs:
-  update-fires:
-    runs-on: ubuntu-latest
+BOUNDARY_FILE = "fars.geojson"
+OUTPUT_FILE = "data/fires.csv"
 
-    steps:
+BASE_URL = "https://nrt3.modaps.eosdis.nasa.gov/archive/FIRMS"
 
-      - name: Checkout repository
-        uses: actions/checkout@v5
+SOURCES = {
+    "MODIS": "modis-c6.1/South_Asia",
+    "VIIRS_SNPP": "suomi-npp-viirs-c2/South_Asia",
+    "VIIRS_NOAA20": "noaa-20-viirs-c2/South_Asia",
+    "VIIRS_NOAA21": "noaa-21-viirs-c2/South_Asia",
+}
 
-      - name: Setup Python
-        uses: actions/setup-python@v6
-        with:
-          python-version: "3.11"
 
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
+def get_headers():
+    if not TOKEN:
+        raise RuntimeError("EARTHDATA_TOKEN تنظیم نشده است.")
 
-      - name: Update fire data
-        env:
-          EARTHDATA_TOKEN: ${{ secrets.EARTHDATA_TOKEN }}
-        run: |
-          python update_fires.py
+    return {
+        "Authorization": f"Bearer {TOKEN}"
+    }
 
-      - name: Check output
-        run: |
-          test -f data/fires.csv
-          echo "fires.csv created successfully"
-          wc -l data/fires.csv
 
-      - name: Commit updated data
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+def get_latest_file(folder_url):
+    response = requests.get(
+        folder_url,
+        headers=get_headers(),
+        timeout=60
+    )
 
-          git add data/fires.csv
+    response.raise_for_status()
 
-          if git diff --cached --quiet; then
-            echo "No changes."
-            exit 0
-          fi
+    files = re.findall(
+        r'href="([^"]+\.(?:txt|csv))"',
+        response.text,
+        flags=re.IGNORECASE
+    )
 
-          git commit -m "Update Fars fire data"
-          git push
+    if not files:
+        raise RuntimeError(
+            f"هیچ فایل داده‌ای پیدا نشد: {folder_url}"
+        )
+
+    return files[-1]
+
+
+def download_file(url):
+    response = requests.get(
+        url,
+        headers=get_headers(),
+        timeout=120
+    )
+
+    response.raise_for_status()
+
+    if not response.text.strip():
+        return pd.DataFrame()
+
+    return pd.read_csv(
+        StringIO(response.text)
+    )
+
+
+def filter_fars(df):
+    if df.empty:
+        return df
+
+    required = {"latitude", "longitude"}
+
+    if not required.issubset(df.columns):
+        raise RuntimeError(
+            f"ستون‌های لازم وجود ندارند. ستون‌های موجود: {list(df.columns)}"
+        )
+
+    fars = gpd.read_file(
+        BOUNDARY_FILE
+    ).to_crs("EPSG:4326")
+
+    points = gpd.GeoDataFrame(
+        df.copy(),
+        geometry=gpd.points_from_xy(
+            df["longitude"],
+            df["latitude"]
+        ),
+        crs="EPSG:4326"
+    )
+
+    result = gpd.sjoin(
+        points,
+        fars[["geometry"]],
+        how="inner",
+        predicate="within"
+    )
+
+    return result.drop(
+        columns=["geometry", "index_right"],
+        errors="ignore"
+    )
+
+
+def main():
+    all_fires = []
+
+    for sensor, folder in SOURCES.items():
+        print(f"\nChecking {sensor}...")
+
+        folder_url = f"{BASE_URL}/{folder}/"
+
+        try:
+            filename = get_latest_file(folder_url)
+            file_url = f"{folder_url}{filename}"
+
+            print(f"Downloading: {filename}")
+
+            df = download_file(file_url)
+
+            if df.empty:
+                print(f"{sensor}: no data")
+                continue
+
+            df = filter_fars(df)
+
+            if df.empty:
+                print(f"{sensor}: no fires in Fars")
+                continue
+
+            df["sensor"] = sensor
+
+            all_fires.append(df)
+
+            print(
+                f"{sensor}: {len(df)} fires in Fars"
+            )
+
+        except Exception as error:
+            print(
+                f"{sensor}: ERROR - {error}"
+            )
+
+    os.makedirs("data", exist_ok=True)
+
+    if all_fires:
+        result = pd.concat(
+            all_fires,
+            ignore_index=True
+        )
+
+        result = result.drop_duplicates(
+            subset=[
+                "latitude",
+                "longitude",
+                "acq_date",
+                "acq_time",
+                "sensor"
+            ],
+            keep="first"
+        )
+    else:
+        result = pd.DataFrame(
+            columns=[
+                "latitude",
+                "longitude",
+                "acq_date",
+                "acq_time",
+                "sensor"
+            ]
+        )
+
+    result.to_csv(
+        OUTPUT_FILE,
+        index=False
+    )
+
+    print(
+        f"\nSaved {len(result)} records to {OUTPUT_FILE}"
+    )
+
+
+if __name__ == "__main__":
+    main()
