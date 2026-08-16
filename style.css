@@ -45,7 +45,53 @@ body {
     color: #222;
 }
 
+
+/* ------------------------------- */
+/* فیلترهای حریق */
+/* ------------------------------- */
+
+.fire-filters {
+    display: flex;
+    gap: 5px;
+
+    background: rgba(255, 255, 255, 0.95);
+    padding: 6px;
+
+    border-radius: 10px;
+
+    box-shadow: 0 2px 10px rgba(0, 0, 0, 0.15);
+}
+
+.fire-filters button {
+    border: none;
+    background: #f1f1f1;
+
+    padding: 7px 10px;
+
+    border-radius: 7px;
+
+    font-family: inherit;
+    font-size: 12px;
+
+    cursor: pointer;
+}
+
+.fire-filters button:hover {
+    background: #e4e4e4;
+}
+
+.fire-filters button.active {
+    background: #ff6600;
+    color: #fff;
+}
+
+
+/* ------------------------------- */
+/* موبایل */
+/* ------------------------------- */
+
 @media (max-width: 600px) {
+
     .header {
         top: 10px;
         padding: 8px 12px;
@@ -53,5 +99,14 @@ body {
 
     .header h1 {
         font-size: 14px;
+    }
+
+    .fire-filters {
+        flex-direction: column;
+    }
+
+    .fire-filters button {
+        font-size: 11px;
+        padding: 6px 8px;
     }
 }
