@@ -1,14 +1,11 @@
 import os
-from io import BytesIO
+import re
+from io import StringIO
 
 import pandas as pd
 import requests
 import geopandas as gpd
 
-
-# --------------------------------------------------
-# تنظیمات
-# --------------------------------------------------
 
 TOKEN = os.getenv("EARTHDATA_TOKEN")
 
@@ -18,93 +15,86 @@ OUTPUT_FILE = "data/fires.csv"
 BASE_URL = "https://nrt3.modaps.eosdis.nasa.gov/archive/FIRMS"
 
 
-# --------------------------------------------------
-# بررسی Token
-# --------------------------------------------------
-
-if not TOKEN:
-    raise RuntimeError("EARTHDATA_TOKEN تنظیم نشده است.")
-
-
-# --------------------------------------------------
-# منابع FIRMS
-# --------------------------------------------------
-
 SOURCES = {
-    "MODIS": "modis-c6.1",
-    "VIIRS_SNPP": "viirs-snpp",
-    "VIIRS_NOAA20": "viirs-noaa20",
-    "VIIRS_NOAA21": "viirs-noaa21",
+    "MODIS": "modis-c6.1/South_Asia",
+    "VIIRS_SNPP": "suomi-npp-viirs-c2/South_Asia",
+    "VIIRS_NOAA20": "noaa-20-viirs-c2/South_Asia",
+    "VIIRS_NOAA21": "noaa-21-viirs-c2/South_Asia",
 }
 
 
-# --------------------------------------------------
-# دریافت فهرست فایل‌های یک منبع
-# --------------------------------------------------
+def get_headers():
+    if not TOKEN:
+        raise RuntimeError("EARTHDATA_TOKEN تنظیم نشده است.")
 
-def get_directory(url):
+    return {
+        "Authorization": f"Bearer {TOKEN}"
+    }
+
+
+def get_latest_file(folder_url):
     response = requests.get(
-        url,
-        headers={
-            "Authorization": f"Bearer {TOKEN}"
-        },
+        folder_url,
+        headers=get_headers(),
         timeout=60
     )
 
     response.raise_for_status()
 
-    return response.text
+    files = re.findall(
+        r'href="([^"]+\.txt)"',
+        response.text
+    )
 
+    if not files:
+        raise RuntimeError(
+            f"هیچ فایل داده‌ای پیدا نشد: {folder_url}"
+        )
 
-# --------------------------------------------------
-# دریافت داده
-# --------------------------------------------------
+    return files[-1]
+
 
 def download_file(url):
-
     response = requests.get(
         url,
-        headers={
-            "Authorization": f"Bearer {TOKEN}"
-        },
+        headers=get_headers(),
         timeout=120
     )
 
     response.raise_for_status()
 
+    text = response.text
+
+    if not text.strip():
+        return pd.DataFrame()
+
     return pd.read_csv(
-        BytesIO(response.content)
+        StringIO(text)
     )
 
 
-# --------------------------------------------------
-# فیلتر فارس با GeoJSON
-# --------------------------------------------------
-
 def filter_fars(df):
+    if df.empty:
+        return df
 
-    gdf = gpd.GeoDataFrame(
+    fars = gpd.read_file(
+        BOUNDARY_FILE
+    ).to_crs("EPSG:4326")
+
+    points = gpd.GeoDataFrame(
         df,
         geometry=gpd.points_from_xy(
-            df.longitude,
-            df.latitude
+            df["longitude"],
+            df["latitude"]
         ),
         crs="EPSG:4326"
     )
 
-    fars = gpd.read_file(
-        BOUNDARY_FILE
-    )
-
-    fars = fars.to_crs(
-        "EPSG:4326"
-    )
-
     result = gpd.sjoin(
-        gdf,
-        fars,
-        predicate="within",
-        how="inner"
+        points,
+        fars[["geometry"]],
+        how="inner",
+        predicate="within"
     )
 
     return result.drop(
@@ -113,73 +103,83 @@ def filter_fars(df):
     )
 
 
-# --------------------------------------------------
-# دریافت داده‌ها
-# --------------------------------------------------
+def main():
+    all_fires = []
 
-all_data = []
+    for sensor, folder in SOURCES.items():
 
+        folder_url = f"{BASE_URL}/{folder}/"
 
-for sensor, folder in SOURCES.items():
+        print(f"Checking {sensor}...")
 
-    print(f"Checking {sensor}...")
+        try:
+            filename = get_latest_file(folder_url)
 
-    url = f"{BASE_URL}/{folder}/"
+            file_url = f"{folder_url}{filename}"
 
-    try:
+            print(f"Downloading: {filename}")
 
-        html = get_directory(url)
+            df = download_file(file_url)
 
-        print(
-            f"{sensor}: directory accessible"
-        )
+            if df.empty:
+                print(f"{sensor}: no data")
+                continue
 
-        # این بخش بعد از تست مسیر واقعی فایل‌ها تکمیل می‌شود.
+            df = filter_fars(df)
 
-    except Exception as error:
+            if df.empty:
+                print(f"{sensor}: no fires in Fars")
+                continue
 
-        print(
-            f"{sensor}: {error}"
-        )
+            df["sensor"] = sensor
 
+            all_fires.append(df)
 
-# --------------------------------------------------
-# ایجاد خروجی اولیه
-# --------------------------------------------------
+            print(
+                f"{sensor}: {len(df)} fires in Fars"
+            )
 
-os.makedirs(
-    "data",
-    exist_ok=True
-)
+        except Exception as error:
+            print(
+                f"{sensor}: ERROR - {error}"
+            )
 
-if all_data:
-
-    result = pd.concat(
-        all_data,
-        ignore_index=True
+    os.makedirs(
+        "data",
+        exist_ok=True
     )
 
-else:
+    if all_fires:
 
-    result = pd.DataFrame(
-        columns=[
-            "latitude",
-            "longitude",
-            "acq_date",
-            "acq_time",
-            "satellite",
-            "instrument",
-            "confidence",
-            "frp"
-        ]
+        result = pd.concat(
+            all_fires,
+            ignore_index=True
+        )
+
+        result = result.drop_duplicates(
+            subset=[
+                "latitude",
+                "longitude",
+                "acq_date",
+                "acq_time",
+                "sensor"
+            ]
+        )
+
+    else:
+
+        result = pd.DataFrame()
+
+    result.to_csv(
+        OUTPUT_FILE,
+        index=False
+    )
+
+    print()
+    print(
+        f"Saved {len(result)} records to {OUTPUT_FILE}"
     )
 
 
-result.to_csv(
-    OUTPUT_FILE,
-    index=False
-)
-
-print(
-    f"Saved {len(result)} records to {OUTPUT_FILE}"
-)
+if __name__ == "__main__":
+    main()
