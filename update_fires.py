@@ -2,9 +2,9 @@ import os
 import re
 from io import StringIO
 
+import geopandas as gpd
 import pandas as pd
 import requests
-import geopandas as gpd
 
 
 TOKEN = os.getenv("EARTHDATA_TOKEN")
@@ -21,16 +21,18 @@ SOURCES = {
     "VIIRS_NOAA21": "noaa-21-viirs-c2/South_Asia",
 }
 
-DAYS_TO_DOWNLOAD = 3
+FILES_PER_SOURCE = 5
 
 
 def get_headers():
     if not TOKEN:
-        raise RuntimeError("EARTHDATA_TOKEN تنظیم نشده است.")
+        raise RuntimeError(
+            "EARTHDATA_TOKEN در GitHub Secrets پیدا نشد."
+        )
 
     return {
         "Authorization": f"Bearer {TOKEN}",
-        "User-Agent": "FARS-FIRE-SENTINEL2/1.0"
+        "User-Agent": "FARS-FIRE-SENTINEL2"
     }
 
 
@@ -38,41 +40,69 @@ def get_files(folder_url):
     response = requests.get(
         folder_url,
         headers=get_headers(),
-        timeout=60
+        timeout=60,
+        allow_redirects=True
     )
 
-    response.raise_for_status()
+    print(
+        f"Directory status: {response.status_code} | "
+        f"URL: {folder_url}"
+    )
+
+    if response.status_code != 200:
+        raise RuntimeError(
+            f"خطا در دسترسی به پوشه FIRMS: "
+            f"{response.status_code}"
+        )
 
     files = re.findall(
-        r'href=["\']([^"\']+\.(?:txt|csv))["\']',
+        r'href=["\']([^"\']+\.txt)["\']',
         response.text,
         flags=re.IGNORECASE
     )
 
+    files = sorted(set(files))
+
     if not files:
         raise RuntimeError(
-            f"هیچ فایل داده‌ای پیدا نشد: {folder_url}"
+            f"هیچ فایل TXT در این مسیر پیدا نشد:\n{folder_url}"
         )
 
-    files = sorted(
-        set(files)
+    selected = files[-FILES_PER_SOURCE:]
+
+    print(
+        f"Found {len(files)} files. "
+        f"Using last {len(selected)} files."
     )
 
-    return files[-DAYS_TO_DOWNLOAD:]
+    for filename in selected:
+        print(f"  {filename}")
+
+    return selected
 
 
-def download_file(url):
+def download_file(file_url):
     response = requests.get(
-        url,
+        file_url,
         headers=get_headers(),
-        timeout=120
+        timeout=120,
+        allow_redirects=True
     )
 
-    response.raise_for_status()
+    print(
+        f"File status: {response.status_code} | "
+        f"{file_url}"
+    )
 
-    text = response.text
+    if response.status_code != 200:
+        raise RuntimeError(
+            f"دانلود فایل موفق نبود: "
+            f"{response.status_code}"
+        )
 
-    if not text.strip():
+    text = response.text.strip()
+
+    if not text:
         return pd.DataFrame()
 
     return pd.read_csv(
@@ -80,25 +110,61 @@ def download_file(url):
     )
 
 
-def filter_fars(df):
-    if df.empty:
-        return df
-
-    required_columns = {
-        "latitude",
-        "longitude"
-    }
-
-    missing = required_columns - set(df.columns)
-
-    if missing:
+def load_fars():
+    if not os.path.exists(BOUNDARY_FILE):
         raise RuntimeError(
-            f"ستون‌های لازم موجود نیستند: {missing}"
+            f"فایل {BOUNDARY_FILE} پیدا نشد."
         )
 
     fars = gpd.read_file(
         BOUNDARY_FILE
-    ).to_crs("EPSG:4326")
+    )
+
+    if fars.empty:
+        raise RuntimeError(
+            "فایل fars.geojson خالی است."
+        )
+
+    return fars.to_crs(
+        "EPSG:4326"
+    )
+
+
+def filter_fars(df, fars):
+    if df.empty:
+        return df
+
+    required = {
+        "latitude",
+        "longitude"
+    }
+
+    missing = required - set(df.columns)
+
+    if missing:
+        raise RuntimeError(
+            f"ستون‌های لازم در داده FIRMS وجود ندارند: {missing}"
+        )
+
+    df["latitude"] = pd.to_numeric(
+        df["latitude"],
+        errors="coerce"
+    )
+
+    df["longitude"] = pd.to_numeric(
+        df["longitude"],
+        errors="coerce"
+    )
+
+    df = df.dropna(
+        subset=[
+            "latitude",
+            "longitude"
+        ]
+    )
+
+    if df.empty:
+        return df
 
     points = gpd.GeoDataFrame(
         df.copy(),
@@ -126,71 +192,104 @@ def filter_fars(df):
 
 
 def main():
+    print("========================================")
+    print("FARS FIRE DATA UPDATE")
+    print("========================================")
+
+    fars = load_fars()
+
     all_fires = []
+    successful_sources = 0
 
     for sensor, folder in SOURCES.items():
 
-        print(f"\n===== {sensor} =====")
+        print()
+        print("========================================")
+        print(f"SOURCE: {sensor}")
+        print("========================================")
 
-        folder_url = f"{BASE_URL}/{folder}/"
+        folder_url = (
+            f"{BASE_URL}/{folder}/"
+        )
 
         try:
-            files = get_files(folder_url)
 
-            print(
-                f"Files found: {len(files)}"
+            files = get_files(
+                folder_url
             )
+
+            source_has_data = False
 
             for filename in files:
 
-                file_url = f"{folder_url}{filename}"
-
-                print(
-                    f"Downloading: {filename}"
+                file_url = (
+                    f"{folder_url}{filename}"
                 )
 
-                try:
-                    df = download_file(
-                        file_url
-                    )
+                print()
+                print(
+                    f"Downloading {filename}"
+                )
 
-                    if df.empty:
-                        print(
-                            "File is empty."
-                        )
-                        continue
+                df = download_file(
+                    file_url
+                )
 
+                if df.empty:
                     print(
-                        f"Total records: {len(df)}"
+                        "File contains no records."
                     )
+                    continue
 
-                    df = filter_fars(df)
+                print(
+                    f"Records in file: {len(df)}"
+                )
 
-                    if df.empty:
-                        print(
-                            "No fire detected inside Fars."
-                        )
-                        continue
+                df = filter_fars(
+                    df,
+                    fars
+                )
 
-                    df["sensor"] = sensor
+                print(
+                    f"Records inside Fars: {len(df)}"
+                )
 
-                    all_fires.append(df)
+                if df.empty:
+                    continue
 
-                    print(
-                        f"Fars records: {len(df)}"
-                    )
+                df["sensor"] = sensor
 
-                except Exception as error:
+                all_fires.append(
+                    df
+                )
 
-                    print(
-                        f"File error: {error}"
-                    )
+                source_has_data = True
+
+            if source_has_data:
+                successful_sources += 1
 
         except Exception as error:
 
+            print()
             print(
-                f"Source error: {error}"
+                f"ERROR in {sensor}:"
             )
+            print(
+                str(error)
+            )
+
+    print()
+    print("========================================")
+    print(
+        f"Successful sources: "
+        f"{successful_sources} / {len(SOURCES)}"
+    )
+    print("========================================")
+
+    if successful_sources == 0:
+        raise RuntimeError(
+            "هیچ منبع FIRMS با موفقیت پردازش نشد."
+        )
 
     os.makedirs(
         "data",
@@ -233,18 +332,15 @@ def main():
     )
 
     print()
+    print("========================================")
     print(
-        "================================"
+        f"FINAL FARS FIRE RECORDS: "
+        f"{len(result)}"
     )
     print(
-        f"Total Fars fires: {len(result)}"
+        f"OUTPUT: {OUTPUT_FILE}"
     )
-    print(
-        f"Output: {OUTPUT_FILE}"
-    )
-    print(
-        "================================"
-    )
+    print("========================================")
 
 
 if __name__ == "__main__":
