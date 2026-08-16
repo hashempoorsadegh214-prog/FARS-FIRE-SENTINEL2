@@ -21,17 +21,20 @@ SOURCES = {
     "VIIRS_NOAA21": "noaa-21-viirs-c2/South_Asia",
 }
 
+DAYS_TO_DOWNLOAD = 3
+
 
 def get_headers():
     if not TOKEN:
         raise RuntimeError("EARTHDATA_TOKEN تنظیم نشده است.")
 
     return {
-        "Authorization": f"Bearer {TOKEN}"
+        "Authorization": f"Bearer {TOKEN}",
+        "User-Agent": "FARS-FIRE-SENTINEL2/1.0"
     }
 
 
-def get_latest_file(folder_url):
+def get_files(folder_url):
     response = requests.get(
         folder_url,
         headers=get_headers(),
@@ -41,7 +44,7 @@ def get_latest_file(folder_url):
     response.raise_for_status()
 
     files = re.findall(
-        r'href="([^"]+\.(?:txt|csv))"',
+        r'href=["\']([^"\']+\.(?:txt|csv))["\']',
         response.text,
         flags=re.IGNORECASE
     )
@@ -51,7 +54,11 @@ def get_latest_file(folder_url):
             f"هیچ فایل داده‌ای پیدا نشد: {folder_url}"
         )
 
-    return files[-1]
+    files = sorted(
+        set(files)
+    )
+
+    return files[-DAYS_TO_DOWNLOAD:]
 
 
 def download_file(url):
@@ -63,11 +70,13 @@ def download_file(url):
 
     response.raise_for_status()
 
-    if not response.text.strip():
+    text = response.text
+
+    if not text.strip():
         return pd.DataFrame()
 
     return pd.read_csv(
-        StringIO(response.text)
+        StringIO(text)
     )
 
 
@@ -75,11 +84,16 @@ def filter_fars(df):
     if df.empty:
         return df
 
-    required = {"latitude", "longitude"}
+    required_columns = {
+        "latitude",
+        "longitude"
+    }
 
-    if not required.issubset(df.columns):
+    missing = required_columns - set(df.columns)
+
+    if missing:
         raise RuntimeError(
-            f"ستون‌های لازم وجود ندارند. ستون‌های موجود: {list(df.columns)}"
+            f"ستون‌های لازم موجود نیستند: {missing}"
         )
 
     fars = gpd.read_file(
@@ -103,7 +117,10 @@ def filter_fars(df):
     )
 
     return result.drop(
-        columns=["geometry", "index_right"],
+        columns=[
+            "geometry",
+            "index_right"
+        ],
         errors="ignore"
     )
 
@@ -112,44 +129,76 @@ def main():
     all_fires = []
 
     for sensor, folder in SOURCES.items():
-        print(f"\nChecking {sensor}...")
+
+        print(f"\n===== {sensor} =====")
 
         folder_url = f"{BASE_URL}/{folder}/"
 
         try:
-            filename = get_latest_file(folder_url)
-            file_url = f"{folder_url}{filename}"
-
-            print(f"Downloading: {filename}")
-
-            df = download_file(file_url)
-
-            if df.empty:
-                print(f"{sensor}: no data")
-                continue
-
-            df = filter_fars(df)
-
-            if df.empty:
-                print(f"{sensor}: no fires in Fars")
-                continue
-
-            df["sensor"] = sensor
-
-            all_fires.append(df)
+            files = get_files(folder_url)
 
             print(
-                f"{sensor}: {len(df)} fires in Fars"
+                f"Files found: {len(files)}"
             )
+
+            for filename in files:
+
+                file_url = f"{folder_url}{filename}"
+
+                print(
+                    f"Downloading: {filename}"
+                )
+
+                try:
+                    df = download_file(
+                        file_url
+                    )
+
+                    if df.empty:
+                        print(
+                            "File is empty."
+                        )
+                        continue
+
+                    print(
+                        f"Total records: {len(df)}"
+                    )
+
+                    df = filter_fars(df)
+
+                    if df.empty:
+                        print(
+                            "No fire detected inside Fars."
+                        )
+                        continue
+
+                    df["sensor"] = sensor
+
+                    all_fires.append(df)
+
+                    print(
+                        f"Fars records: {len(df)}"
+                    )
+
+                except Exception as error:
+
+                    print(
+                        f"File error: {error}"
+                    )
 
         except Exception as error:
+
             print(
-                f"{sensor}: ERROR - {error}"
+                f"Source error: {error}"
             )
 
-    os.makedirs("data", exist_ok=True)
+    os.makedirs(
+        "data",
+        exist_ok=True
+    )
 
     if all_fires:
+
         result = pd.concat(
             all_fires,
             ignore_index=True
@@ -165,7 +214,9 @@ def main():
             ],
             keep="first"
         )
+
     else:
+
         result = pd.DataFrame(
             columns=[
                 "latitude",
@@ -181,8 +232,18 @@ def main():
         index=False
     )
 
+    print()
     print(
-        f"\nSaved {len(result)} records to {OUTPUT_FILE}"
+        "================================"
+    )
+    print(
+        f"Total Fars fires: {len(result)}"
+    )
+    print(
+        f"Output: {OUTPUT_FILE}"
+    )
+    print(
+        "================================"
     )
 
 
