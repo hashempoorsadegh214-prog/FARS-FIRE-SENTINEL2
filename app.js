@@ -52,10 +52,10 @@ let allFires = [];
 
 
 // ----------------------------------------
-// دریافت CSV فقط یک بار
+// دریافت CSV
 // ----------------------------------------
 
-fetch("data/fires.csv?v=2")
+fetch("data/fires.csv?v=3")
     .then(response => {
 
         if (!response.ok) {
@@ -76,38 +76,31 @@ fetch("data/fires.csv?v=2")
         showFires("5days");
     })
     .catch(error => {
-
-        console.error(
-            "Fire data error:",
-            error
-        );
+        console.error("Fire data error:", error);
     });
 
 
 // ----------------------------------------
-// رویداد دکمه‌های فیلتر
+// دکمه‌های فیلتر
 // ----------------------------------------
 
 document.querySelectorAll(".filter-btn")
     .forEach(button => {
 
-        button.addEventListener(
-            "click",
-            () => {
+        button.addEventListener("click", () => {
 
-                document
-                    .querySelectorAll(".filter-btn")
-                    .forEach(btn => {
-                        btn.classList.remove("active");
-                    });
+            document
+                .querySelectorAll(".filter-btn")
+                .forEach(btn => {
+                    btn.classList.remove("active");
+                });
 
-                button.classList.add("active");
+            button.classList.add("active");
 
-                showFires(
-                    button.dataset.filter
-                );
-            }
-        );
+            showFires(
+                button.dataset.filter
+            );
+        });
     });
 
 
@@ -119,136 +112,169 @@ function showFires(filter) {
 
     fireLayer.clearLayers();
 
-    const now = new Date();
-
-    let filtered = [];
+    let filteredFires = [];
 
 
-    if (filter === "today") {
+    // ------------------------------------
+    // ۵ روز گذشته
+    // فعلاً همه داده‌های موجود در CSV
+    // ------------------------------------
+
+    if (filter === "5days") {
+
+        filteredFires = allFires.slice();
+    }
+
+
+    // ------------------------------------
+    // امروز
+    // ------------------------------------
+
+    else if (filter === "today") {
 
         const today =
-            getIranDate(now);
+            getIranDate(
+                new Date()
+            );
 
-        filtered = allFires.filter(
+        filteredFires = allFires.filter(
             fire =>
                 fire.acq_date === today
         );
     }
 
 
+    // ------------------------------------
+    // ۲۴ ساعت گذشته
+    // ------------------------------------
+
     else if (filter === "24h") {
 
-        const limit =
-            now.getTime() -
-            24 * 60 * 60 * 1000;
-
-        filtered = allFires.filter(
-            fire => {
-
-                const date =
-                    createFireDate(fire);
-
-                return (
-                    date &&
-                    date.getTime() >= limit
-                );
-            }
-        );
-    }
-
-
-    else {
+        const now =
+            new Date();
 
         const limit =
             now.getTime() -
-            5 * 24 * 60 * 60 * 1000;
+            (24 * 60 * 60 * 1000);
 
-        filtered = allFires.filter(
-            fire => {
+        filteredFires =
+            allFires.filter(
+                fire => {
 
-                const date =
-                    createFireDate(fire);
+                    const fireDate =
+                        parseFireDate(
+                            fire
+                        );
 
-                return (
-                    date &&
-                    date.getTime() >= limit
-                );
-            }
-        );
-    }
-
-
-    filtered.forEach(
-        fire => {
-
-            const lat =
-                parseFloat(
-                    fire.latitude
-                );
-
-            const lon =
-                parseFloat(
-                    fire.longitude
-                );
-
-            if (
-                Number.isNaN(lat) ||
-                Number.isNaN(lon)
-            ) {
-                return;
-            }
-
-
-            const marker =
-                L.circleMarker(
-                    [lat, lon],
-                    {
-                        radius: 6,
-                        color: "#ffffff",
-                        weight: 1,
-                        fillColor: "#ff2600",
-                        fillOpacity: 0.9
+                    if (!fireDate) {
+                        return false;
                     }
-                );
 
-
-            marker.bindPopup(`
-                <div dir="rtl">
-                    <strong>🔥 حریق</strong>
-                    <br><br>
-                    تاریخ: ${fire.acq_date || "-"}
-                    <br>
-                    ساعت: ${formatTime(fire.acq_time)}
-                    <br>
-                    ماهواره: ${fire.sensor || "-"}
-                    <br>
-                    اطمینان: ${fire.confidence || "-"}
-                    <br>
-                    FRP: ${fire.frp || "-"}
-                    <br>
-                    روز/شب: ${fire.daynight || "-"}
-                </div>
-            `);
-
-
-            marker.addTo(
-                fireLayer
+                    return (
+                        fireDate.getTime() >= limit &&
+                        fireDate.getTime() <= now.getTime()
+                    );
+                }
             );
+    }
+
+
+    // ------------------------------------
+    // ایجاد نقاط
+    // ------------------------------------
+
+    filteredFires.forEach(fire => {
+
+        const latitude =
+            parseFloat(
+                fire.latitude
+            );
+
+        const longitude =
+            parseFloat(
+                fire.longitude
+            );
+
+        if (
+            Number.isNaN(latitude) ||
+            Number.isNaN(longitude)
+        ) {
+            return;
         }
-    );
+
+
+        const marker =
+            L.circleMarker(
+                [
+                    latitude,
+                    longitude
+                ],
+                {
+                    radius: 6,
+                    color: "#ffffff",
+                    weight: 1,
+                    fillColor: "#ff2600",
+                    fillOpacity: 0.9
+                }
+            );
+
+
+        marker.bindPopup(`
+            <div dir="rtl">
+
+                <strong>🔥 حریق</strong>
+
+                <br><br>
+
+                تاریخ:
+                ${fire.acq_date || "-"}
+
+                <br>
+
+                ساعت:
+                ${formatTime(fire.acq_time)}
+
+                <br>
+
+                ماهواره:
+                ${fire.sensor || "-"}
+
+                <br>
+
+                اطمینان:
+                ${fire.confidence || "-"}
+
+                <br>
+
+                FRP:
+                ${fire.frp || "-"}
+
+                <br>
+
+                روز/شب:
+                ${fire.daynight || "-"}
+
+            </div>
+        `);
+
+
+        marker.addTo(
+            fireLayer
+        );
+    });
 
 
     console.log(
-        `${filtered.length} fires displayed`
+        `Displayed fires: ${filteredFires.length}`
     );
 }
 
 
 // ----------------------------------------
-// ساخت تاریخ حریق
+// تبدیل تاریخ و ساعت حریق
 // ----------------------------------------
 
-function createFireDate(fire) {
+function parseFireDate(fire) {
 
     if (
         !fire.acq_date ||
@@ -259,6 +285,8 @@ function createFireDate(fire) {
 
     const time =
         String(fire.acq_time)
+            .trim()
+            .replace(":", "")
             .padStart(4, "0");
 
     const hour =
@@ -272,6 +300,13 @@ function createFireDate(fire) {
             time.substring(2, 4),
             10
         );
+
+    if (
+        Number.isNaN(hour) ||
+        Number.isNaN(minute)
+    ) {
+        return null;
+    }
 
     return new Date(
         `${fire.acq_date}T${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}:00Z`
@@ -298,7 +333,7 @@ function getIranDate(date) {
 
 
 // ----------------------------------------
-// نمایش ساعت
+// ساعت
 // ----------------------------------------
 
 function formatTime(time) {
@@ -309,6 +344,8 @@ function formatTime(time) {
 
     const value =
         String(time)
+            .trim()
+            .replace(":", "")
             .padStart(4, "0");
 
     return (
@@ -335,7 +372,9 @@ function parseCSV(text) {
     }
 
     const headers =
-        parseCSVLine(lines[0]);
+        parseCSVLine(
+            lines[0]
+        );
 
     return lines
         .slice(1)
@@ -364,7 +403,7 @@ function parseCSV(text) {
 
 
 // ----------------------------------------
-// پردازش یک خط CSV
+// CSV line parser
 // ----------------------------------------
 
 function parseCSVLine(line) {
@@ -373,7 +412,6 @@ function parseCSVLine(line) {
 
     let current = "";
     let quoted = false;
-
 
     for (
         let i = 0;
@@ -384,12 +422,10 @@ function parseCSVLine(line) {
         const char =
             line[i];
 
-
         if (char === '"') {
             quoted = !quoted;
             continue;
         }
-
 
         if (
             char === "," &&
@@ -405,10 +441,8 @@ function parseCSVLine(line) {
             continue;
         }
 
-
         current += char;
     }
-
 
     result.push(
         current
