@@ -17,13 +17,27 @@
 <body>
 
     <header class="header">
-        <h1>سامانه پایش حریق استان فارس</h1>
+        سامانه پایش حریق استان فارس
     </header>
+
+    <div class="filters">
+        <button class="filter-btn" data-filter="today">
+            امروز
+        </button>
+
+        <button class="filter-btn" data-filter="24h">
+            ۲۴ ساعت گذشته
+        </button>
+
+        <button class="filter-btn active" data-filter="5days">
+            ۵ روز گذشته
+        </button>
+    </div>
 
     <main id="map"></main>
 
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-    <script src="app.js"></script>
+    <script src="app.js?v=2"></script>
 
 </body>
 </html>
